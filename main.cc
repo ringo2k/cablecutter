@@ -10,8 +10,17 @@
 
 #define TOGGLELED (PORTB ^= ( 1 << PB0))
 
-#define CUTTERON PORTC |= ( 1 << PC1)
-#define CUTTEROFF PORTC &= ~ ( 1 << PC1)
+#define CUTTERON PORTC &= ~( 1 << PC1); PORTB |= ( 1 << PB2)
+#define CUTTEROFF PORTB &= ~( 1 << PB2);PORTC &= ~( 1 << PC1)
+#define CUTTERREVERSE PORTC |= ( 1 << PC1); PORTB &= ~( 1 << PB2)
+
+#define STEPPER_ON PORTC |= ( 1 << PC5)
+#define STEPPER_OFF PORTC &= ~(1 << PC5)
+
+#define MMPERSTEP 0.22
+
+uint32_t motorTiming = 0;
+
 
 typedef enum stepper_directions_m{
 	RETRACT,
@@ -21,7 +30,8 @@ typedef enum stepper_directions_m{
 struct cableExtruder
 {
 	uint16_t speed; //mm/s
-	uint16_t length; //mm
+	uint32_t length; //mm
+
 	stepperDirections dir;
 };
 
@@ -29,13 +39,20 @@ struct cableExtruder cableEx;
 typedef enum motor_states_m{
 	STOP,
 	CUT,
+	CUT_ISO,
 	CUTTING,
+	CUTTING_ISO,
+	REVERSE,
 	CALIBRATE
 } motorState;
 
 typedef enum cable_making_state{
 	WAIT,
 	START,
+	EXTRUDING_ISO,
+	PREPARE_ISOLATE,
+	RETRACT_ISO,
+	OPEN_CUTTER,
 	EXTRUDING,
 	CHOP,
 	DONE
@@ -47,6 +64,11 @@ ISR(TIMER0_OVF_vect)
 {
 	static uint16_t tickCounter = 0;
 	tickCounter++;
+
+	if (motorTiming > 0)
+	{
+		motorTiming--;
+	}
 
 	if (tickCounter >= cableEx.speed)
 	{
@@ -65,6 +87,7 @@ ISR(TIMER0_OVF_vect)
 		} else {
 			PORTD &= ~( 1 << PD6);
 		}
+		tickCounter = 0;
 
 	}
     //PORTB ^= ( 1 << PB0);                    // Toggle PB0
@@ -77,12 +100,13 @@ int main()
 	motorState mState = STOP;
 	cableMakingStates makingState = WAIT;
 
-	cableEx.speed = 200;
+	cableEx.speed = 5;
 	cableEx.length =0;
 	cableEx.dir = EXTRACT;
 
 	//IO
 	DDRB |= ( 1 << PB0); //LED
+	DDRB |= ( 1 << PB2); //PWM Cutter
 	DDRD |= ( 1 << PD6); //DIR
 	DDRD |= ( 1 << PD7); //Step
 
@@ -91,12 +115,22 @@ int main()
 	PORTC |= ( 1 << PC3); // Button enter
 	PORTC |= ( 1 << PC2); // PU for Cutter Pos switch
 
-	DDRC |= (( 1 << PC1));
 
-	//timer init
+	DDRC |= (( 1 << PC1));
+	DDRC |= (( 1 << PC5)); // sleep mode
+
+
+	// pwm init
+    //TCCR1A = (1<<WGM10)|(1<<COM1B1);  // Wave Form Generation is Fast PWM 8 Bit,
+    //TCCR1B = (1<<WGM12)|(1<<CS12);     // OC1A and OC1B are cleared on compare match
+          //  |(1<<CS10);               // and set at BOTTOM. Clock Prescaler is 1024.
+
+    OCR1B = 0;
+	//timer init stepper
 	TCCR0 |= ( 1 << CS01); // Prescaling 8
 	TIMSK |= ( 1 << TOIE0); // Interrupt enable
 	sei();
+
 
 	if (CUTTERPOSSWITCH)
 	{
@@ -212,10 +246,31 @@ int main()
 				if (DOWNPRESSED)
 				{
 					while(DOWNPRESSED);
-					cableEx.length = 200;
+					STEPPER_ON;
+					_delay_ms(100);
+					cableEx.length = (uint32_t)(5.0 / MMPERSTEP);
+					makingState=EXTRUDING_ISO;
+				}
+				break;
+
+			case EXTRUDING_ISO:
+				if ( cableEx.length == 0)
+				{
+					mState = CUT_ISO;
+					makingState = PREPARE_ISOLATE;
+				}
+				break;
+
+			case PREPARE_ISOLATE:
+				if (mState == STOP)
+				{
+					STEPPER_ON;
+					_delay_ms(100);
+					cableEx.length = (uint32_t)(40.0 / MMPERSTEP);
 					makingState=EXTRUDING;
 				}
 				break;
+
 			case EXTRUDING:
 				if ( cableEx.length == 0)
 				{
@@ -231,6 +286,7 @@ int main()
 				break;
 			case DONE:
 				makingState = WAIT;
+				STEPPER_OFF;
 				break;
 
 			default:
@@ -242,6 +298,7 @@ int main()
 		{
 			case STOP:
 				CUTTEROFF;
+
 				break;
 			case CUT:
 				CUTTERON;
@@ -249,8 +306,29 @@ int main()
 				{
 					mState = CUT;
 				} else {
+					_delay_ms(1000);
 					mState = CUTTING;
 				}
+				break;
+			case CUT_ISO:
+				CUTTERON;
+				if (CUTTERPOSSWITCH)
+				{
+					mState = CUT_ISO;
+					motorTiming = 235;
+				} else {
+					mState = CUTTING_ISO;
+				}
+				break;
+			case CUTTING_ISO:
+				if ((CUTTERPOSSWITCH) || ( motorTiming == 0))
+				{
+					mState = REVERSE;
+				}
+				break;
+			case REVERSE:
+				CUTTERREVERSE;
+				mState = CUTTING;
 				break;
 			case CALIBRATE:
 				mState = CUT;
