@@ -11,7 +11,7 @@
 #define TOGGLELED (PORTB ^= ( 1 << PB0))
 
 #define CUTTERON PORTC &= ~( 1 << PC1); PORTB |= ( 1 << PB2)
-#define CUTTEROFF PORTB &= ~( 1 << PB2);PORTC &= ~( 1 << PC1)
+#define CUTTEROFF PORTB |= ( 1 << PB2);PORTC |= ( 1 << PC1)
 #define CUTTERREVERSE PORTC |= ( 1 << PC1); PORTB &= ~( 1 << PB2)
 
 #define STEPPER_ON PORTC |= ( 1 << PC5)
@@ -31,6 +31,8 @@ struct cableExtruder
 {
 	uint16_t speed; //mm/s
 	uint32_t length; //mm
+	float unisolatedLength; // mm
+	float targetLength;
 
 	stepperDirections dir;
 };
@@ -49,11 +51,13 @@ typedef enum motor_states_m{
 typedef enum cable_making_state{
 	WAIT,
 	START,
-	EXTRUDING_ISO,
-	PREPARE_ISOLATE,
+	EXTRUDING_FRONT,
+	EXTRUDING_BACK,
+	PREPARE_ISOLATE_FRONT,
+	PREPARE_ISOLATE_BACK,
 	RETRACT_ISO,
 	OPEN_CUTTER,
-	EXTRUDING,
+	EXTRUDING_MAIN,
 	CHOP,
 	DONE
 } cableMakingStates;
@@ -90,8 +94,6 @@ ISR(TIMER0_OVF_vect)
 		tickCounter = 0;
 
 	}
-    //PORTB ^= ( 1 << PB0);                    // Toggle PB0
-                                      // f_PB0 = 1MHz/1042/256/2 = 1.9Hz
 }
 
 int main()
@@ -103,6 +105,8 @@ int main()
 	cableEx.speed = 5;
 	cableEx.length =0;
 	cableEx.dir = EXTRACT;
+	cableEx.unisolatedLength = 5.0;
+	cableEx.targetLength = 40.0;
 
 	//IO
 	DDRB |= ( 1 << PB0); //LED
@@ -122,7 +126,7 @@ int main()
 
 	// pwm init
     //TCCR1A = (1<<WGM10)|(1<<COM1B1);  // Wave Form Generation is Fast PWM 8 Bit,
-    //TCCR1B = (1<<WGM12)|(1<<CS12);     // OC1A and OC1B are cleared on compare match
+    //TCCR1B = (1<<WGM12)|(1<<CS11) |( 1 << CS10);     // OC1A and OC1B are cleared on compare match
           //  |(1<<CS10);               // and set at BOTTOM. Clock Prescaler is 1024.
 
     OCR1B = 0;
@@ -130,6 +134,21 @@ int main()
 	TCCR0 |= ( 1 << CS01); // Prescaling 8
 	TIMSK |= ( 1 << TOIE0); // Interrupt enable
 	sei();
+
+	while(0)
+	{
+		PORTC |= ( 1 << PC1);
+
+		PORTB ^= ( 1 << PB2);
+		_delay_ms(10);
+		if (CUTTERPOSSWITCH)
+		{
+			PORTC &= ~( 1 << PC1);
+			PORTB &= ~( 1 << PB2);
+			_delay_ms(5000);
+			PORTB |= ( 1 << PB2);
+		}
+	}
 
 
 	if (CUTTERPOSSWITCH)
@@ -148,15 +167,8 @@ int main()
 	while(1)
 	{
 
-		if (!( mainLoopCounter % 8))
-		{
-			//PORTB ^= ( 1 << PB0);
 
-			//PORTD ^= ( 1 << PD7); //Step
-
-		}
-
-		if (!( mainLoopCounter % 100))
+		if (!( mainLoopCounter % 500))
 		{
 			lcd_clrscr();
 			//show motor state in first line
@@ -165,6 +177,12 @@ int main()
 			{
 			case STOP:
 				lcd_puts("STOP");
+				break;
+			case CUT_ISO:
+				lcd_puts("ISO");
+				break;
+			case REVERSE:
+				lcd_puts("REV");
 				break;
 			case CUT:
 				lcd_puts("CUT");
@@ -186,8 +204,14 @@ int main()
 				case WAIT:
 					lcd_puts("WAITING");
 					break;
-				case EXTRUDING:
-					lcd_puts("EXTRUDING");
+				case EXTRUDING_MAIN:
+					lcd_puts("EXTRUDING_MAIN");
+					break;
+				case EXTRUDING_BACK:
+					lcd_puts("EXTRUDING_BACK");
+					break;
+				case EXTRUDING_FRONT:
+					lcd_puts("EXTRUDING_FRONT");
 					break;
 				case CHOP:
 					lcd_puts("CHOP");
@@ -199,6 +223,7 @@ int main()
 				default:
 					break;
 			}
+
 			if (cableEx.length > 0)
 			{
 				lcd_puts(" +");
@@ -217,7 +242,7 @@ int main()
 			lcd_puts("UP");
 			while(UPPRESSED);
 
-			mState = CUT;
+			mState = CUT_ISO;
 
 
 		}
@@ -248,36 +273,53 @@ int main()
 					while(DOWNPRESSED);
 					STEPPER_ON;
 					_delay_ms(100);
-					cableEx.length = (uint32_t)(5.0 / MMPERSTEP);
-					makingState=EXTRUDING_ISO;
+					cableEx.length = (uint32_t)(cableEx.unisolatedLength / MMPERSTEP);
+					makingState=EXTRUDING_FRONT;
 				}
 				break;
 
-			case EXTRUDING_ISO:
+			case EXTRUDING_FRONT:
 				if ( cableEx.length == 0)
 				{
 					mState = CUT_ISO;
-					makingState = PREPARE_ISOLATE;
+					makingState = PREPARE_ISOLATE_FRONT;
 				}
 				break;
 
-			case PREPARE_ISOLATE:
+			case PREPARE_ISOLATE_FRONT:
 				if (mState == STOP)
 				{
 					STEPPER_ON;
-					_delay_ms(100);
-					cableEx.length = (uint32_t)(40.0 / MMPERSTEP);
-					makingState=EXTRUDING;
+					cableEx.length = (uint32_t)((cableEx.targetLength - ( 2 * cableEx.unisolatedLength))/ MMPERSTEP);
+					makingState=EXTRUDING_MAIN;
 				}
 				break;
 
-			case EXTRUDING:
+			case EXTRUDING_MAIN:
+				if ( cableEx.length == 0)
+				{
+					mState = CUT_ISO;
+					makingState = PREPARE_ISOLATE_BACK;
+
+				}
+				break;
+			case PREPARE_ISOLATE_BACK:
+				if (mState == STOP)
+				{
+					cableEx.length = (uint32_t)(cableEx.unisolatedLength / MMPERSTEP);
+					makingState=EXTRUDING_BACK;
+
+				}
+				break;
+
+			case EXTRUDING_BACK:
 				if ( cableEx.length == 0)
 				{
 					mState = CUT;
 					makingState = CHOP;
 				}
 				break;
+
 			case CHOP:
 				if (mState == STOP)
 				{
@@ -306,16 +348,17 @@ int main()
 				{
 					mState = CUT;
 				} else {
-					_delay_ms(1000);
+
 					mState = CUTTING;
 				}
 				break;
 			case CUT_ISO:
 				CUTTERON;
+				//while(!(CUTTERPOSSWITCH));
 				if (CUTTERPOSSWITCH)
 				{
 					mState = CUT_ISO;
-					motorTiming = 235;
+					motorTiming = 198;
 				} else {
 					mState = CUTTING_ISO;
 				}
@@ -336,7 +379,21 @@ int main()
 			case CUTTING:
 				if (CUTTERPOSSWITCH)
 				{
+					CUTTEROFF;
 					mState = STOP;
+				} else {
+//					if (motorTiming == 0)
+//					{
+//						motorTiming = 200;
+//					}
+//					if (motorTiming >= 100)
+//					{
+//						PORTB |= ( 1 << PB2);
+//					} else {
+//						PORTB &= ( 1 << PB2);
+//					}
+
+					//PORTB ^= ( 1 << PB2);
 				}
 				break;
 
