@@ -2,11 +2,14 @@
 #include "lcd.h"
 #include <avr/delay.h>
 #include <avr/interrupt.h>
+#include <stdlib.h>
+#include <avr/eeprom.h>
 
-#define UPPRESSED (!(PINB & ( 1 << PB4)))
-#define DOWNPRESSED !(PINB & ( 1 << PB5))
-#define ENTERPRESSED !(PINC & ( 1 << PC3))
 #define CUTTERPOSSWITCH !(PINC & ( 1 << PC2))
+
+#define CENTERPRESSED !(PINB & ( 1 << PB5))
+#define LEFTPRESSED (!(PINB & ( 1 << PB4)))
+#define RIGHTPRESSED (PINC & ( 1 << PC3))
 
 #define TOGGLELED (PORTB ^= ( 1 << PB0))
 
@@ -23,18 +26,43 @@
 uint32_t motorTiming = 0;
 
 
+void lcd_puti(int num)
+{
+	char buf[32];
+	lcd_puts(itoa(num,buf,10));
+}
+
 typedef enum stepper_directions_m{
 	RETRACT,
 	EXTRACT
 } stepperDirections;
 
+typedef enum lcdMenuNames_m{
+	LCD_START,
+	LCD_SETUP_LENGTH,
+	LCD_SETUP_ISOLATION,
+	LCD_SETUP_SPEED,
+	LCD_SETUP_ISOLATE_DEPTH,
+	LCD_SETUP_NUMBER
+} lcdMenuNames;
+
+typedef enum buttonsState_m{
+	NOT_PRESSED,
+	CENTER_PRESSED,
+	LEFT_PRESSED,
+	RIGHT_PRESSED
+} buttonSate;
+
+
 struct cableExtruder
 {
 	uint16_t speed; //mm/s
 	uint32_t length; //mm
-	float unisolatedLength; // mm
-	float targetLength;
-
+	uint32_t motorTimeout;
+	uint16_t unisolatedLength; // mm
+	uint16_t targetLength;
+	uint16_t count;
+	uint16_t number;
 	stepperDirections dir;
 };
 
@@ -98,18 +126,275 @@ ISR(TIMER0_OVF_vect)
 	}
 }
 
+
+char * getMakingStateName(cableMakingStates* makingState)
+{
+	switch (*makingState)
+	{
+	case WAIT:
+		return "Ready";
+		break;
+	case START:
+		return "Starting..";
+		break;
+	case EXTRUDING_FRONT:
+		return "extrude cable f";
+		break;
+	case PREPARE_ISOLATE_BACK:
+	case PREPARE_ISOLATE_FRONT:
+		return "cut isolation";
+		break;
+	case CHOP:
+		return "cutting cable";
+		break;
+	case EXTRUDING_BACK:
+		return "extrude cable b";
+		break;
+	case EXTRUDING_MAIN:
+		return "extrude cable m";
+		break;
+	default:
+		return "unknown";
+		break;
+	}
+}
+
+bool uiHandling(cableMakingStates*  makingState, cableExtruder* cableEx, buttonSate bState)
+{
+	static lcdMenuNames lcdMenu = LCD_START;
+	bool ret = false;
+
+	switch (lcdMenu)
+	{
+	case LCD_START:
+		lcd_clrscr();
+		if ( *makingState != WAIT)
+		{
+			lcd_puts("Cable Cutter\n");
+			lcd_puts(getMakingStateName(makingState));
+		} else {
+			lcd_puts("L: ");
+			lcd_puti((int)cableEx->targetLength);
+			lcd_puts (" I: ");
+			lcd_puti((int)cableEx->unisolatedLength);
+			lcd_puts (" C: ");
+			lcd_puti((int)cableEx->number);
+
+			lcd_puts ("\n");
+			lcd_puts("Start  Setup  ");
+			if (bState == LEFT_PRESSED)
+			{
+				*makingState = START;
+			} else if (bState == CENTER_PRESSED)
+			{
+				lcdMenu = LCD_SETUP_LENGTH;
+			} else if (bState == RIGHT_PRESSED)
+			{
+
+			}
+		}
+		break;
+
+	case LCD_SETUP_LENGTH:
+		lcd_clrscr();
+		lcd_puts("Length (mm): ");
+		lcd_puti((int)cableEx->targetLength);
+		lcd_puts ("\n");
+		lcd_puts("+     Enter    -");
+		if (bState == LEFT_PRESSED)
+		{
+			cableEx->targetLength++;
+		} else if (bState == CENTER_PRESSED)
+		{
+			lcdMenu = LCD_SETUP_ISOLATION;
+		} else if (bState == RIGHT_PRESSED)
+		{
+			cableEx->targetLength--;
+		}
+		break;
+
+	case LCD_SETUP_ISOLATION:
+			lcd_clrscr();
+			lcd_puts("Isolate (mm): ");
+			lcd_puti((int)cableEx->unisolatedLength);
+			lcd_puts ("\n");
+			lcd_puts("+     Enter    -");
+			if (bState == LEFT_PRESSED)
+			{
+				cableEx->unisolatedLength++;
+			} else if (bState == CENTER_PRESSED)
+			{
+				lcdMenu = LCD_SETUP_SPEED;
+			} else if (bState == RIGHT_PRESSED)
+			{
+				cableEx->unisolatedLength--;
+			}
+			break;
+
+	case LCD_SETUP_SPEED:
+			lcd_clrscr();
+			lcd_puts("Speed : ");
+			lcd_puti((int)cableEx->speed);
+			lcd_puts ("\n");
+			lcd_puts("+     Enter    -");
+			if (bState == LEFT_PRESSED)
+			{
+				cableEx->speed++;
+			} else if (bState == CENTER_PRESSED)
+			{
+				lcdMenu = LCD_SETUP_ISOLATE_DEPTH;
+			} else if (bState == RIGHT_PRESSED)
+			{
+				cableEx->speed--;
+			}
+			break;
+
+	case LCD_SETUP_ISOLATE_DEPTH:
+			lcd_clrscr();
+			lcd_puts("Depth : ");
+			lcd_puti((int)cableEx->motorTimeout);
+			lcd_puts ("\n");
+			lcd_puts("+     Enter    -");
+			if (bState == LEFT_PRESSED)
+			{
+				cableEx->motorTimeout += 10;
+			} else if (bState == CENTER_PRESSED)
+			{
+				lcdMenu = LCD_SETUP_NUMBER;
+			} else if (bState == RIGHT_PRESSED)
+			{
+				cableEx->motorTimeout -= 10;
+			}
+			break;
+
+	case LCD_SETUP_NUMBER:
+				lcd_clrscr();
+				lcd_puts("# Cables : ");
+				lcd_puti((int)cableEx->number);
+				lcd_puts ("\n");
+				lcd_puts("+     Enter    -");
+				if (bState == LEFT_PRESSED)
+				{
+					cableEx->number += 1;
+				} else if (bState == CENTER_PRESSED)
+				{
+					lcdMenu = LCD_START;
+					ret = true;
+				} else if (bState == RIGHT_PRESSED)
+				{
+					cableEx->number -= 1;
+				}
+				break;
+
+
+	default:
+		lcd_clrscr();
+		lcd_puts("unknown menu point..");
+		break;
+	}
+
+	return ret;
+}
+
+
+struct cableExtruder eeCableEx EEMEM;
+
+buttonSate checkButtons()
+{
+	static unsigned int pressButtonCenterDebounce = 0;
+	static unsigned int pressButtonLeftDebounce = 0;
+	static unsigned int pressButtonRightDebounce = 0;
+
+	if (CENTERPRESSED)
+	{
+		pressButtonCenterDebounce++;
+		if (pressButtonCenterDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonCenterDebounce = SWITCHDEBOUNCE;
+		}
+	} else {
+		if (pressButtonCenterDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonCenterDebounce = 0;
+			return CENTER_PRESSED;
+		}
+		pressButtonCenterDebounce = 0;
+	}
+
+	if (LEFTPRESSED)
+	{
+		pressButtonLeftDebounce++;
+		if (pressButtonLeftDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonLeftDebounce = SWITCHDEBOUNCE;
+		}
+
+	} else {
+		if (pressButtonLeftDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonLeftDebounce = 0;
+			return LEFT_PRESSED;
+		}
+		pressButtonLeftDebounce = 0;
+	}
+
+	if (RIGHTPRESSED)
+	{
+		pressButtonRightDebounce++;
+		if (pressButtonRightDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonRightDebounce = SWITCHDEBOUNCE;
+		}
+
+	} else {
+		if (pressButtonRightDebounce >= SWITCHDEBOUNCE)
+		{
+			pressButtonRightDebounce = 0;
+			return RIGHT_PRESSED;
+		}
+		pressButtonRightDebounce = 0;
+
+	}
+
+	return NOT_PRESSED;
+}
+
 int main()
 {
 	unsigned int mainLoopCounter = 0;
 	unsigned int switchDebounce = 0;
+
 	motorState mState = STOP;
 	cableMakingStates makingState = WAIT;
+	buttonSate bState = NOT_PRESSED;
 
-	cableEx.speed = 40;
+
+	cableEx.speed = 45;
 	cableEx.length =0;
 	cableEx.dir = EXTRACT;
-	cableEx.unisolatedLength = 3.0;
+	cableEx.unisolatedLength = 5.0;
 	cableEx.targetLength = 40.0;
+	cableEx.motorTimeout = 1500;
+	cableEx.number = 1;
+
+	// read setting from eeprom
+	eeprom_read_block((void*)&cableEx, (void*)&eeCableEx,sizeof(struct cableExtruder));
+
+	if ( (int) cableEx.targetLength == -1)
+	{
+		//restore defaults
+		cableEx.speed = 45;
+		cableEx.length =0;
+		cableEx.dir = EXTRACT;
+		cableEx.unisolatedLength = 5.0;
+		cableEx.targetLength = 40.0;
+		cableEx.motorTimeout = 1500;
+		cableEx.number = 1;
+		eeprom_write_block((void*)&cableEx, (void*)&eeCableEx,sizeof(struct cableExtruder));
+
+
+	}
+
 
 	//IO
 	DDRB |= ( 1 << PB0); //LED
@@ -132,27 +417,11 @@ int main()
     //TCCR1B = (1<<WGM12)|(1<<CS11) |( 1 << CS10);     // OC1A and OC1B are cleared on compare match
           //  |(1<<CS10);               // and set at BOTTOM. Clock Prescaler is 1024.
 
-    OCR1B = 0;
+    //OCR1B = 0;
 	//timer init stepper
 	TCCR0 |= ( 1 << CS01); // Prescaling 8
 	TIMSK |= ( 1 << TOIE0); // Interrupt enable
 	sei();
-
-	while(0)
-	{
-		PORTC |= ( 1 << PC1);
-
-		PORTB ^= ( 1 << PB2);
-		_delay_ms(10);
-		if (CUTTERPOSSWITCH)
-		{
-			PORTC &= ~( 1 << PC1);
-			PORTB &= ~( 1 << PB2);
-			_delay_ms(5000);
-			PORTB |= ( 1 << PB2);
-		}
-	}
-
 
 	if (CUTTERPOSSWITCH)
 	{
@@ -161,131 +430,110 @@ int main()
 		mState = CALIBRATE;
 	}
 
-	//UI
+	//UI LCD INIT
 	lcd_init(LCD_DISP_ON);
 	lcd_clrscr();
-	lcd_puts("Hello World!");
-	lcd_puts("\n Works!");
 
 	while(1)
 	{
 
+		bState = checkButtons();
+		if (bState != NOT_PRESSED)
+		{
+			if ( uiHandling(&makingState, &cableEx, bState) == true)
+			{
+				eeprom_write_block((void*)&cableEx, (void*)&eeCableEx,sizeof(struct cableExtruder));
+			}
+		}
 
 		if (!( mainLoopCounter % 4000))
 		{
-			lcd_clrscr();
-			//show motor state in first line
-			lcd_puts("CUTTER: ");
-			switch (mState)
-			{
-			case STOP:
-				lcd_puts("STOP");
-				break;
-			case CUT_ISO:
-				lcd_puts("ISO");
-				break;
-			case REVERSE:
-				lcd_puts("REV");
-				break;
-			case CUT:
-				lcd_puts("CUT");
-				break;
-			case CUTTING:
-				lcd_puts("CUT*");
-				break;
-			case CALIBRATE:
-				lcd_puts("CAL");
-				break;
-
-			default:
-				lcd_puts("unknown");
-				break;
-
-			}
-			lcd_puts("\n");
-			switch (makingState) {
-				case WAIT:
-					lcd_puts("WAITING");
-					break;
-				case EXTRUDING_MAIN:
-					lcd_puts("EXT_MAIN");
-					break;
-				case EXTRUDING_BACK:
-					lcd_puts("EXT_BACK");
-					break;
-				case EXTRUDING_FRONT:
-					lcd_puts("EXT_FRONT");
-					break;
-				case CHOP:
-					lcd_puts("CHOP");
-					break;
-				case DONE:
-					lcd_puts("FINISH");
-					break;
-
-				default:
-					break;
-			}
-
-			if (cableEx.length > 0)
-			{
-				lcd_puts(" +");
-
-			}else {
-				lcd_puts(" -");
-			}
-			//PORTB ^= ( 1 << PB0);
-			//PORTD ^= ( 1 << PD6); //DIR
-
+			uiHandling(&makingState, &cableEx, bState);
 		}
-
-		if (UPPRESSED)
-		{
-			lcd_clrscr();
-			lcd_puts("UP");
-			while(UPPRESSED);
-
-			mState = CUT_ISO;
-
-
-		}
-
-//		if (CUTTERPOSSWITCH)
-//		{
 //			lcd_clrscr();
-//			lcd_puts("pushed");
-//		} else {
-//			lcd_clrscr();
-//			lcd_puts("not pushed");
+//			//show motor state in first line
+//			lcd_puts("CUTTER: ");
+//			switch (mState)
+//			{
+//			case STOP:
+//				lcd_puts("STOP");
+//				break;
+//			case CUT_ISO:
+//				lcd_puts("ISO");
+//				break;
+//			case REVERSE:
+//				lcd_puts("REV");
+//				break;
+//			case CUT:
+//				lcd_puts("CUT");
+//				break;
+//			case CUTTING:
+//				lcd_puts("CUT*");
+//				break;
+//			case CALIBRATE:
+//				lcd_puts("CAL");
+//				break;
+//
+//			default:
+//				lcd_puts("unknown");
+//				break;
+//
+//			}
+//			lcd_puts("\n");
+//			switch (makingState) {
+//				case WAIT:
+//					lcd_puts("WAITING");
+//					break;
+//				case EXTRUDING_MAIN:
+//					lcd_puts("EXT_MAIN");
+//					break;
+//				case EXTRUDING_BACK:
+//					lcd_puts("EXT_BACK");
+//					break;
+//				case EXTRUDING_FRONT:
+//					lcd_puts("EXT_FRONT");
+//					break;
+//				case CHOP:
+//					lcd_puts("CHOP");
+//					break;
+//				case DONE:
+//					lcd_puts("FINISH");
+//					break;
+//
+//				default:
+//					break;
+//			}
+//
+//			if (cableEx.length > 0)
+//			{
+//				lcd_puts(" +");
+//
+//			}else {
+//				lcd_puts(" -");
+//			}
+//			//PORTB ^= ( 1 << PB0);
+//			//PORTD ^= ( 1 << PD6); //DIR
+//
 //		}
-
-
-		if (!ENTERPRESSED)
-		{
-			lcd_clrscr();
-			lcd_puts("ENTER");
-			while(!ENTERPRESSED);
-
-		}
 
 		switch (makingState) {
 			case WAIT:
-				// Switch activation
-				if (DOWNPRESSED)
-				{
-					while(DOWNPRESSED);
-					STEPPER_ON;
-					_delay_ms(100);
-					cableEx.length = (uint32_t)(cableEx.unisolatedLength / MMPERSTEP);
-					makingState=EXTRUDING_FRONT;
-				}
-				break;
+				cableEx.count = cableEx.number;
+				STEPPER_OFF;
+			break;
+
+			case START:
+				STEPPER_ON;
+				_delay_ms(100);
+				cableEx.length = (uint32_t)(cableEx.unisolatedLength / MMPERSTEP);
+				makingState=EXTRUDING_FRONT;
+			break;
 
 			case EXTRUDING_FRONT:
 				if ( cableEx.length == 0)
 				{
 					mState = CUT_ISO;
-					makingState = RETRACT_FRONT;
+					makingState = PREPARE_ISOLATE_FRONT;
 				}
 				break;
 
@@ -352,8 +600,14 @@ int main()
 				}
 				break;
 			case DONE:
-				makingState = WAIT;
-				STEPPER_OFF;
+				cableEx.count--;
+				if ( cableEx.count == 0)
+				{
+					makingState = WAIT; // and stop
+					STEPPER_OFF;
+				} else {
+					makingState =START; // next cable
+				}
 				break;
 
 			default:
@@ -398,7 +652,7 @@ int main()
 				if (switchDebounce < SWITCHDEBOUNCE)
 				{
 					mState = CUT_ISO;
-					motorTiming = 1510;
+					motorTiming = cableEx.motorTimeout;
 				} else {
 					mState = CUTTING_ISO;
 				}
