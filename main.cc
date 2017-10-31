@@ -18,6 +18,7 @@
 #define STEPPER_OFF PORTC &= ~(1 << PC5)
 
 #define MMPERSTEP 0.22
+#define SWITCHDEBOUNCE 100
 
 uint32_t motorTiming = 0;
 
@@ -55,7 +56,8 @@ typedef enum cable_making_state{
 	EXTRUDING_BACK,
 	PREPARE_ISOLATE_FRONT,
 	PREPARE_ISOLATE_BACK,
-	RETRACT_ISO,
+	RETRACT_FRONT,
+	RETRACT_FRONT_FINISH,
 	OPEN_CUTTER,
 	EXTRUDING_MAIN,
 	CHOP,
@@ -99,13 +101,14 @@ ISR(TIMER0_OVF_vect)
 int main()
 {
 	unsigned int mainLoopCounter = 0;
+	unsigned int switchDebounce = 0;
 	motorState mState = STOP;
 	cableMakingStates makingState = WAIT;
 
-	cableEx.speed = 5;
+	cableEx.speed = 40;
 	cableEx.length =0;
 	cableEx.dir = EXTRACT;
-	cableEx.unisolatedLength = 5.0;
+	cableEx.unisolatedLength = 3.0;
 	cableEx.targetLength = 40.0;
 
 	//IO
@@ -168,7 +171,7 @@ int main()
 	{
 
 
-		if (!( mainLoopCounter % 500))
+		if (!( mainLoopCounter % 4000))
 		{
 			lcd_clrscr();
 			//show motor state in first line
@@ -205,13 +208,13 @@ int main()
 					lcd_puts("WAITING");
 					break;
 				case EXTRUDING_MAIN:
-					lcd_puts("EXTRUDING_MAIN");
+					lcd_puts("EXT_MAIN");
 					break;
 				case EXTRUDING_BACK:
-					lcd_puts("EXTRUDING_BACK");
+					lcd_puts("EXT_BACK");
 					break;
 				case EXTRUDING_FRONT:
-					lcd_puts("EXTRUDING_FRONT");
+					lcd_puts("EXT_FRONT");
 					break;
 				case CHOP:
 					lcd_puts("CHOP");
@@ -282,6 +285,25 @@ int main()
 				if ( cableEx.length == 0)
 				{
 					mState = CUT_ISO;
+					makingState = RETRACT_FRONT;
+				}
+				break;
+
+			case RETRACT_FRONT:
+				if (mState == STOP)
+				{
+					STEPPER_ON;
+					cableEx.dir = RETRACT;
+					cableEx.length = (uint32_t)(cableEx.unisolatedLength / MMPERSTEP);
+					makingState=RETRACT_FRONT_FINISH;
+				}
+				break;
+
+			case RETRACT_FRONT_FINISH:
+				if ( cableEx.length == 0)
+				{
+					mState = REVERSE;
+					cableEx.dir = EXTRACT;
 					makingState = PREPARE_ISOLATE_FRONT;
 				}
 				break;
@@ -303,6 +325,9 @@ int main()
 
 				}
 				break;
+
+
+
 			case PREPARE_ISOLATE_BACK:
 				if (mState == STOP)
 				{
@@ -344,7 +369,15 @@ int main()
 				break;
 			case CUT:
 				CUTTERON;
+
 				if (CUTTERPOSSWITCH)
+				{
+					switchDebounce = 0;
+				} else {
+					switchDebounce++;
+				}
+
+				if (switchDebounce < SWITCHDEBOUNCE)
 				{
 					mState = CUT;
 				} else {
@@ -354,18 +387,27 @@ int main()
 				break;
 			case CUT_ISO:
 				CUTTERON;
-				//while(!(CUTTERPOSSWITCH));
+
 				if (CUTTERPOSSWITCH)
 				{
+					switchDebounce = 0;
+				} else {
+					switchDebounce++;
+				}
+
+				if (switchDebounce < SWITCHDEBOUNCE)
+				{
 					mState = CUT_ISO;
-					motorTiming = 198;
+					motorTiming = 1510;
 				} else {
 					mState = CUTTING_ISO;
 				}
 				break;
 			case CUTTING_ISO:
-				if ((CUTTERPOSSWITCH) || ( motorTiming == 0))
+
+				if ( motorTiming == 0)
 				{
+					CUTTERREVERSE;
 					mState = REVERSE;
 				}
 				break;
@@ -377,7 +419,15 @@ int main()
 				mState = CUT;
 				break;
 			case CUTTING:
+
 				if (CUTTERPOSSWITCH)
+				{
+					switchDebounce++;
+				} else {
+					switchDebounce = 0;
+				}
+
+				if (switchDebounce > SWITCHDEBOUNCE)
 				{
 					CUTTEROFF;
 					mState = STOP;
